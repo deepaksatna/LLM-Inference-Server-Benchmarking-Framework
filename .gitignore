@@ -1,0 +1,123 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Model files (too large for git)
+*.bin
+*.safetensors
+*.gguf
+*.ggml
+*.pt
+*.pth
+*.onnx
+models/
+
+# Nsight Systems profiles (large binary files)
+*.nsys-rep
+*.qdrep
+*.sqlite
+
+# Huggingface cache
+.cache/
+huggingface/
+
+# Docker
+*.tar
+*.tar.gz
+
+# Kubernetes secrets
+*secret*.yaml
+*credentials*
+*.pem
+*.key
+
+# Environment files
+.env
+.env.local
+.env.*.local
+*.env
+
+# Large result files (keep sample, ignore full runs)
+results/benchmarks/*/raw/
+results/profiles/*.nsys-rep
+
+# Registry credentials
+docker-config.json
+ocirsecret.yaml
+
+# Node modules (if any JS tools used)
+node_modules/
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Test artifacts
+.pytest_cache/
+.tox/
+.nox/
+
+# Build artifacts
+*.o
+*.a
+*.dylib

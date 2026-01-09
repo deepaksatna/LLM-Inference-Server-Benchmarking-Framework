@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LLM Inference Benchmark Results",
+  "description": "Schema for benchmark results from vLLM, Triton, and TGI",
+  "type": "object",
+  "required": ["backend", "config", "statistics"],
+  "properties": {
+    "backend": {
+      "type": "string",
+      "enum": ["vllm", "triton", "tgi"],
+      "description": "Inference backend used"
+    },
+    "config": {
+      "type": "object",
+      "required": ["iterations", "warmup", "max_tokens", "concurrency"],
+      "properties": {
+        "iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of inference iterations"
+        },
+        "warmup": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of warmup iterations"
+        },
+        "max_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum tokens to generate"
+        },
+        "concurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of concurrent workers"
+        }
+      }
+    },
+    "statistics": {
+      "type": "object",
+      "required": ["successful_requests", "latency_ms", "throughput"],
+      "properties": {
+        "successful_requests": {
+          "type": "integer",
+          "description": "Number of successful requests"
+        },
+        "failed_requests": {
+          "type": "integer",
+          "description": "Number of failed requests"
+        },
+        "error_rate_percent": {
+          "type": "number",
+          "description": "Error rate as percentage"
+        },
+        "total_time_sec": {
+          "type": "number",
+          "description": "Total benchmark duration in seconds"
+        },
+        "latency_ms": {
+          "type": "object",
+          "properties": {
+            "min": {"type": "number"},
+            "max": {"type": "number"},
+            "mean": {"type": "number"},
+            "median": {"type": "number"},
+            "p50": {"type": "number"},
+            "p90": {"type": "number"},
+            "p95": {"type": "number"},
+            "p99": {"type": "number"}
+          },
+          "description": "Latency statistics in milliseconds"
+        },
+        "throughput": {
+          "type": "object",
+          "properties": {
+            "requests_per_sec": {"type": "number"},
+            "tokens_per_sec": {"type": "number"}
+          },
+          "description": "Throughput metrics"
+        },
+        "tokens": {
+          "type": "object",
+          "properties": {
+            "total_generated": {"type": "integer"},
+            "avg_per_request": {"type": "number"}
+          },
+          "description": "Token generation statistics"
+        }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "properties": {
+        "gpu_type": {"type": "string"},
+        "hourly_rate": {"type": "number"},
+        "per_million_tokens": {"type": "number"}
+      },
+      "description": "Cost calculation (optional)"
+    },
+    "raw_latencies": {
+      "type": "array",
+      "items": {"type": "number"},
+      "description": "Raw latency values for each request"
+    },
+    "raw_tokens": {
+      "type": "array",
+      "items": {"type": "integer"},
+      "description": "Raw token counts for each request"
+    }
+  }
+}

@@ -1,0 +1,83 @@
+---
+# PersistentVolumeClaim for shared model storage
+# Pre-download models to avoid repeated downloads across backends
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+  namespace: bench
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: oci-bv  # OCI Block Volume
+---
+# ConfigMap for model download script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-download-script
+  namespace: bench
+data:
+  download_model.py: |
+    #!/usr/bin/env python3
+    """Download Mistral-7B-Instruct model to shared storage"""
+    import os
+    from huggingface_hub import snapshot_download
+
+    MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"
+    CACHE_DIR = "/models"
+
+    print(f"Downloading {MODEL_ID} to {CACHE_DIR}...")
+
+    snapshot_download(
+        repo_id=MODEL_ID,
+        local_dir=f"{CACHE_DIR}/{MODEL_ID.replace('/', '_')}",
+        local_dir_use_symlinks=False
+    )
+
+    print("Download complete!")
+    print(f"Model available at: {CACHE_DIR}/{MODEL_ID.replace('/', '_')}")
+---
+# Job to pre-download model (run once)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+  namespace: bench
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: downloader
+        image: python:3.10-slim
+        command: ["python3", "/scripts/download_model.py"]
+        env:
+        - name: HF_HOME
+          value: "/models/.cache"
+        - name: TRANSFORMERS_CACHE
+          value: "/models/.cache"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+        - name: scripts
+          mountPath: /scripts
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-cache
+      - name: scripts
+        configMap:
+          name: model-download-script
+          defaultMode: 0755

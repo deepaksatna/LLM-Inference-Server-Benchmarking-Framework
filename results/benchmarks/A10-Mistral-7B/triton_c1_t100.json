@@ -1,0 +1,1 @@
+{"backend": "triton", "concurrency": 1, "max_tokens": 100, "total_requests": 30, "successful_requests": 30, "failed_requests": 0, "total_time_sec": 103.792, "throughput_rps": 0.289, "tokens_per_sec": 28.9, "avg_latency_ms": 3459.6, "p50_latency_ms": 3459.6, "p95_latency_ms": 3467.8, "p99_latency_ms": 3468.6, "min_latency_ms": 3449.5, "max_latency_ms": 3468.6}

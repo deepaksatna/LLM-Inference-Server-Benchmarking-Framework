@@ -1,0 +1,1 @@
+{"backend": "vllm", "concurrency": 8, "max_tokens": 50, "total_requests": 30, "successful_requests": 30, "failed_requests": 0, "total_time_sec": 7.194, "throughput_rps": 4.17, "tokens_per_sec": 208.5, "avg_latency_ms": 1796.3, "p50_latency_ms": 1799.1, "p95_latency_ms": 1806.7, "p99_latency_ms": 1807.9, "min_latency_ms": 1776.5, "max_latency_ms": 1807.9}

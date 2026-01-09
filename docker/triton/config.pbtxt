@@ -1,0 +1,62 @@
+backend: "vllm"
+max_batch_size: 0
+
+model_transaction_policy {
+  decoupled: True
+}
+
+input [
+  {
+    name: "text_input"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  },
+  {
+    name: "stream"
+    data_type: TYPE_BOOL
+    dims: [ 1 ]
+    optional: true
+  },
+  {
+    name: "sampling_parameters"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+    optional: true
+  }
+]
+
+output [
+  {
+    name: "text_output"
+    data_type: TYPE_STRING
+    dims: [ -1 ]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_MODEL
+  }
+]
+
+parameters {
+  key: "model"
+  value: { string_value: "mistralai/Mistral-7B-Instruct-v0.2" }
+}
+parameters {
+  key: "tensor_parallel_size"
+  value: { string_value: "1" }
+}
+parameters {
+  key: "gpu_memory_utilization"
+  value: { string_value: "0.90" }
+}
+parameters {
+  key: "max_model_len"
+  value: { string_value: "8192" }
+}
+parameters {
+  key: "dtype"
+  value: { string_value: "auto" }
+}

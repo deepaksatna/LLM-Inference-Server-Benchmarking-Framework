@@ -1,0 +1,278 @@
+---
+# NVIDIA Triton Inference Server with vLLM Backend
+# Using vLLM backend for LLM inference (simpler than TensorRT-LLM conversion)
+# Reference: https://github.com/triton-inference-server/vllm_backend
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: triton-model-config
+  namespace: bench
+data:
+  config.pbtxt: |
+    backend: "vllm"
+    max_batch_size: 0
+
+    model_transaction_policy {
+      decoupled: True
+    }
+
+    input [
+      {
+        name: "text_input"
+        data_type: TYPE_STRING
+        dims: [ 1 ]
+      },
+      {
+        name: "stream"
+        data_type: TYPE_BOOL
+        dims: [ 1 ]
+        optional: true
+      },
+      {
+        name: "sampling_parameters"
+        data_type: TYPE_STRING
+        dims: [ 1 ]
+        optional: true
+      }
+    ]
+
+    output [
+      {
+        name: "text_output"
+        data_type: TYPE_STRING
+        dims: [ -1 ]
+      }
+    ]
+
+    instance_group [
+      {
+        count: 1
+        kind: KIND_MODEL
+      }
+    ]
+
+    parameters {
+      key: "model"
+      value: {
+        string_value: "mistralai/Mistral-7B-Instruct-v0.2"
+      }
+    }
+
+    parameters {
+      key: "tensor_parallel_size"
+      value: {
+        string_value: "1"
+      }
+    }
+
+    parameters {
+      key: "gpu_memory_utilization"
+      value: {
+        string_value: "0.90"
+      }
+    }
+
+    parameters {
+      key: "max_model_len"
+      value: {
+        string_value: "8192"
+      }
+    }
+
+    parameters {
+      key: "dtype"
+      value: {
+        string_value: "auto"
+      }
+    }
+
+  model.json: |
+    {
+      "model": "mistralai/Mistral-7B-Instruct-v0.2",
+      "tensor_parallel_size": 1,
+      "gpu_memory_utilization": 0.90,
+      "max_model_len": 8192,
+      "dtype": "auto",
+      "trust_remote_code": true
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-server
+  namespace: bench
+  labels:
+    app: triton-server
+    backend: triton
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: triton-server
+  template:
+    metadata:
+      labels:
+        app: triton-server
+        backend: triton
+    spec:
+      serviceAccountName: bench-sa
+      imagePullSecrets:
+        - name: ocirsecret
+
+      initContainers:
+      - name: model-setup
+        image: python:3.10-slim
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "Setting up Triton model repository..."
+
+            # Create model directory structure
+            MODEL_NAME="mistral"
+            MODEL_DIR="/model-repository/${MODEL_NAME}"
+            mkdir -p "${MODEL_DIR}/1"
+
+            # Copy config.pbtxt
+            cp /config/config.pbtxt "${MODEL_DIR}/config.pbtxt"
+
+            # Copy model.json for vLLM backend
+            cp /config/model.json "${MODEL_DIR}/1/model.json"
+
+            echo "Model repository structure:"
+            find /model-repository -type f
+
+            echo "Config contents:"
+            cat "${MODEL_DIR}/config.pbtxt"
+        volumeMounts:
+        - name: model-repository
+          mountPath: /model-repository
+        - name: config
+          mountPath: /config
+
+      containers:
+      - name: triton
+        # OFFLINE IMAGE: Pre-downloaded Mistral-7B model + Triton config
+        image: fra.ocir.io/frntrd2vyxvi/models:llm-triton-offline-v1
+        command: ["tritonserver"]
+        args:
+          - "--model-repository=/model-repository"
+          - "--http-port=8000"
+          - "--grpc-port=8001"
+          - "--metrics-port=8002"
+          - "--log-verbose=1"
+          - "--strict-model-config=false"
+
+        ports:
+        - containerPort: 8000
+          name: http
+        - containerPort: 8001
+          name: grpc
+        - containerPort: 8002
+          name: metrics
+
+        env:
+        - name: HF_HOME
+          value: "/root/.cache/huggingface"
+        - name: TRANSFORMERS_CACHE
+          value: "/root/.cache/huggingface"
+        # Disable offline mode at runtime - model is cached
+        - name: HF_HUB_OFFLINE
+          value: "0"
+        - name: TRANSFORMERS_OFFLINE
+          value: "0"
+        # NCCL network interface for OKE (critical for GPU communication)
+        - name: NCCL_SOCKET_IFNAME
+          value: "ens3"
+
+        resources:
+          requests:
+            memory: "16Gi"
+            cpu: "4"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+
+        volumeMounts:
+        - name: model-repository
+          mountPath: /model-repository
+        - name: model-cache
+          mountPath: /root/.cache/huggingface
+        - name: dshm
+          mountPath: /dev/shm
+
+        readinessProbe:
+          httpGet:
+            path: /v2/health/ready
+            port: 8000
+          initialDelaySeconds: 180
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+        livenessProbe:
+          httpGet:
+            path: /v2/health/live
+            port: 8000
+          initialDelaySeconds: 240
+          periodSeconds: 30
+          timeoutSeconds: 10
+
+      volumes:
+      - name: model-repository
+        emptyDir: {}
+      - name: model-cache
+        emptyDir: {}
+      - name: config
+        configMap:
+          name: triton-model-config
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "8Gi"
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-service
+  namespace: bench
+spec:
+  type: ClusterIP
+  selector:
+    app: triton-server
+  ports:
+  - port: 8000
+    targetPort: 8000
+    name: http
+  - port: 8001
+    targetPort: 8001
+    name: grpc
+  - port: 8002
+    targetPort: 8002
+    name: metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-external
+  namespace: bench
+spec:
+  type: LoadBalancer
+  selector:
+    app: triton-server
+  ports:
+  - port: 80
+    targetPort: 8000
+    name: http
+  - port: 8001
+    targetPort: 8001
+    name: grpc

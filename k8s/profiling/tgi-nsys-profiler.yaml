@@ -1,0 +1,303 @@
+# HuggingFace TGI Nsight Systems GPU Profiler Job
+#
+# This job profiles HuggingFace Text Generation Inference (TGI) server using
+# Nsight Systems to capture full CUDA kernel timeline, memory operations, and GPU metrics.
+#
+# Prerequisites:
+#   1. nsys .deb package copied to GPU node at /tmp/nsight-systems-cli-2025.6.1.deb
+#   2. Scale down existing TGI deployment: kubectl scale deployment tgi-server -n bench --replicas=0
+#   3. OCI registry secret 'ocirsecret' in bench namespace
+#   4. Either:
+#      a. Model pre-cached in container image, OR
+#      b. Network access to download from HuggingFace Hub, OR
+#      c. PVC with pre-downloaded model weights
+#
+# Usage:
+#   kubectl apply -f tgi-nsys-profiler.yaml
+#   kubectl logs -f job/tgi-nsys-profiler -n bench
+#   kubectl cp bench/<pod-name>:/results/tgi_gpu_timeline.nsys-rep ./tgi_gpu_timeline.nsys-rep
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tgi-nsys-profiler
+  namespace: bench
+  labels:
+    app: tgi-nsys-profiler
+    profiler: nsys
+    server: tgi
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200  # Auto-cleanup after 2 hours
+  template:
+    metadata:
+      labels:
+        app: tgi-nsys-profiler
+        profiler: nsys
+    spec:
+      restartPolicy: Never
+      serviceAccountName: bench-sa
+      imagePullSecrets:
+        - name: ocirsecret
+
+      containers:
+      - name: tgi-profiler
+        image: fra.ocir.io/frntrd2vyxvi/models:llm-tgi-offline-v1
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "=============================================="
+            echo "  TGI Server GPU Profiling with Nsight Systems"
+            echo "=============================================="
+            echo "Start time: $(date)"
+            echo ""
+
+            # ============================================
+            # Step 1: Install Nsight Systems
+            # ============================================
+            echo "Step 1: Installing Nsight Systems..."
+
+            if [ -f /tmp/nsight-systems-cli.deb ]; then
+                # TGI image may be missing some dependencies, use --force-depends
+                dpkg --force-depends -i /tmp/nsight-systems-cli.deb 2>&1 | tail -5
+                echo "nsys installed from mounted package"
+            else
+                echo "ERROR: nsys package not found at /tmp/nsight-systems-cli.deb"
+                exit 1
+            fi
+
+            # Use full path to avoid PATH issues
+            NSYS="/opt/nvidia/nsight-systems-cli/2025.6.1/bin/nsys"
+
+            if [ ! -f "$NSYS" ]; then
+                echo "ERROR: nsys binary not found at $NSYS"
+                # Try to find where it was installed
+                find /opt -name "nsys" -type f 2>/dev/null || echo "nsys not found in /opt"
+                exit 1
+            fi
+
+            echo "nsys version:"
+            $NSYS --version
+            echo ""
+
+            # ============================================
+            # Step 2: Create results directory
+            # ============================================
+            mkdir -p /results
+            echo "Results directory: /results"
+            echo ""
+
+            # ============================================
+            # Step 3: Check model cache
+            # ============================================
+            echo "Step 3: Checking model cache..."
+            if [ -d "/data/hub/models--mistralai--Mistral-7B-Instruct-v0.2" ]; then
+                echo "Model found in cache at /data"
+            elif [ -d "/root/.cache/huggingface/hub/models--mistralai--Mistral-7B-Instruct-v0.2" ]; then
+                echo "Model found in default cache"
+            else
+                echo "Model not cached - will download from HuggingFace Hub"
+                echo "Note: This requires network access and may take 10-15 minutes"
+            fi
+            echo ""
+
+            # ============================================
+            # Step 4: Start TGI with nsys profiling
+            # ============================================
+            echo "Step 4: Starting TGI server with nsys GPU profiling..."
+            echo ""
+            echo "Profiling configuration:"
+            echo "  - Trace: cuda, nvtx, cudnn, cublas, osrt"
+            echo "  - Duration: 360 seconds max (allow time for model download)"
+            echo "  - CUDA memory tracking: enabled"
+            echo "  - Kernel backtraces: enabled"
+            echo ""
+
+            # Start TGI wrapped with nsys profiling
+            $NSYS profile \
+                --output=/results/tgi_gpu_timeline \
+                --trace=cuda,nvtx,cudnn,cublas,osrt \
+                --cuda-memory-usage=true \
+                --cudabacktrace=kernel \
+                --force-overwrite=true \
+                --duration=360 \
+                --sample=process-tree \
+                --backtrace=dwarf \
+                text-generation-launcher \
+                    --model-id mistralai/Mistral-7B-Instruct-v0.2 \
+                    --port 8000 \
+                    --max-input-length 4096 \
+                    --max-total-tokens 8192 \
+                    --max-batch-prefill-tokens 8192 \
+                    --max-concurrent-requests 64 \
+                    --dtype float16 &
+
+            TGI_PID=$!
+            echo "TGI process started with PID: $TGI_PID"
+            echo ""
+
+            # ============================================
+            # Step 5: Wait for server to be ready
+            # ============================================
+            echo "Step 5: Waiting for TGI server to be ready..."
+            echo "(Note: TGI may take 5-10 minutes if downloading model)"
+            SERVER_READY=false
+            for i in $(seq 1 180); do
+                if curl -s http://localhost:8000/health 2>/dev/null | grep -qiE "ok|true|healthy"; then
+                    echo "TGI server is ready! (attempt $i)"
+                    SERVER_READY=true
+                    break
+                fi
+                if [ $((i % 10)) -eq 0 ]; then
+                    echo "  Still waiting... ($i/180)"
+                fi
+                sleep 5
+            done
+
+            if [ "$SERVER_READY" = false ]; then
+                echo "WARNING: TGI server may not be fully ready within timeout"
+                echo "Checking server status..."
+                curl -s http://localhost:8000/health || echo "Server not responding"
+                echo ""
+                echo "Continuing anyway - profile will capture what's available"
+            fi
+            echo ""
+
+            # ============================================
+            # Step 6: Generate inference load
+            # ============================================
+            echo "Step 6: Generating inference load for GPU profiling..."
+            echo "Sending 10 inference requests..."
+            echo ""
+
+            for i in $(seq 1 10); do
+                echo "  Request $i/10..."
+                RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:8000/generate \
+                    -H "Content-Type: application/json" \
+                    -d '{
+                        "inputs": "Explain transformer self-attention mechanism with mathematical details. Include the scaled dot-product attention formula Q*K^T/sqrt(d_k) and multi-head attention.",
+                        "parameters": {
+                            "max_new_tokens": 200
+                        }
+                    }' 2>/dev/null)
+                HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+                if [ "$HTTP_CODE" = "200" ]; then
+                    echo "    Request $i completed successfully"
+                else
+                    echo "    Request $i returned HTTP $HTTP_CODE"
+                fi
+                sleep 3
+            done
+
+            echo ""
+            echo "Inference requests completed."
+            echo ""
+
+            # ============================================
+            # Step 7: Wait for profiling to complete
+            # ============================================
+            echo "Step 7: Waiting for nsys profiling to complete..."
+            wait $TGI_PID 2>/dev/null || true
+
+            echo ""
+            echo "=============================================="
+            echo "  Profiling Complete"
+            echo "=============================================="
+            echo ""
+
+            # ============================================
+            # Step 8: Display results
+            # ============================================
+            echo "Generated profile files:"
+            ls -lh /results/
+            echo ""
+
+            if [ -f /results/tgi_gpu_timeline.nsys-rep ]; then
+                PROFILE_SIZE=$(ls -lh /results/tgi_gpu_timeline.nsys-rep | awk '{print $5}')
+                echo "SUCCESS: Profile generated - $PROFILE_SIZE"
+                echo ""
+                echo "To extract the profile:"
+                echo "  kubectl cp bench/$(hostname):/results/tgi_gpu_timeline.nsys-rep ./tgi_gpu_timeline.nsys-rep"
+            else
+                echo "WARNING: Profile file not found."
+            fi
+
+            echo ""
+            echo "End time: $(date)"
+            echo ""
+            echo "Keeping pod alive for file extraction (30 minutes)..."
+            sleep 1800
+
+        env:
+        - name: HF_HOME
+          value: "/data"
+        - name: HUGGINGFACE_HUB_CACHE
+          value: "/data"
+        - name: TRANSFORMERS_OFFLINE
+          value: "0"
+        - name: HF_HUB_OFFLINE
+          value: "0"
+
+        resources:
+          requests:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "48Gi"
+            cpu: "16"
+            nvidia.com/gpu: "1"
+
+        volumeMounts:
+        - name: nsys-package
+          mountPath: /tmp/nsight-systems-cli.deb
+          subPath: nsight-systems-cli-2025.6.1.deb
+        - name: model-cache
+          mountPath: /data
+        - name: results
+          mountPath: /results
+        - name: dshm
+          mountPath: /dev/shm
+
+      volumes:
+      # nsys package from host
+      - name: nsys-package
+        hostPath:
+          path: /tmp/nsight-systems-cli-2025.6.1.deb
+          type: File
+      # Model cache (use PVC for pre-downloaded models)
+      - name: model-cache
+        emptyDir: {}
+      # Results directory
+      - name: results
+        emptyDir: {}
+      # Shared memory for PyTorch
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "16Gi"
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+
+---
+# Optional: TGI Profiler with PVC for pre-cached model
+# Use this if you have a PVC with the model already downloaded
+#
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: tgi-nsys-profiler-with-cache
+#   namespace: bench
+# spec:
+#   # ... same as above, but replace model-cache volume with:
+#   # volumes:
+#   # - name: model-cache
+#   #   persistentVolumeClaim:
+#   #     claimName: model-cache-pvc

@@ -1,0 +1,21 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bench
+  labels:
+    project: llm-inference-benchmark
+    environment: profiling
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bench-sa
+  namespace: bench
+---
+# OCIR Pull Secret - Create with:
+# kubectl create secret docker-registry ocirsecret \
+#   --docker-server=fra.ocir.io \
+#   --docker-username='frntrd2vyxvi/oracleidentitycloudservice/<email>' \
+#   --docker-password='<auth-token>' \
+#   -n bench

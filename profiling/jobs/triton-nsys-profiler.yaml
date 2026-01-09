@@ -1,0 +1,372 @@
+# Triton Inference Server Nsight Systems GPU Profiler Job
+#
+# This job profiles NVIDIA Triton Inference Server (with vLLM backend) using
+# Nsight Systems to capture full CUDA kernel timeline, memory operations, and GPU metrics.
+#
+# Prerequisites:
+#   1. nsys .deb package copied to GPU node at /tmp/nsight-systems-cli-2025.6.1.deb
+#   2. Scale down existing Triton deployment: kubectl scale deployment triton-server -n bench --replicas=0
+#   3. OCI registry secret 'ocirsecret' in bench namespace
+#
+# Usage:
+#   kubectl apply -f triton-nsys-profiler.yaml
+#   kubectl logs -f job/triton-nsys-profiler -n bench
+#   kubectl cp bench/<pod-name>:/results/triton_gpu_timeline.nsys-rep ./triton_gpu_timeline.nsys-rep
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: triton-nsys-profiler
+  namespace: bench
+  labels:
+    app: triton-nsys-profiler
+    profiler: nsys
+    server: triton
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 7200  # Auto-cleanup after 2 hours
+  template:
+    metadata:
+      labels:
+        app: triton-nsys-profiler
+        profiler: nsys
+    spec:
+      restartPolicy: Never
+      serviceAccountName: bench-sa
+      imagePullSecrets:
+        - name: ocirsecret
+
+      # Init container to setup model repository
+      initContainers:
+      - name: model-setup
+        image: python:3.10-slim
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "=============================================="
+            echo "  Setting up Triton Model Repository"
+            echo "=============================================="
+
+            MODEL_NAME="mistral"
+            MODEL_DIR="/model-repository/${MODEL_NAME}"
+
+            echo "Creating model directory: $MODEL_DIR"
+            mkdir -p "${MODEL_DIR}/1"
+
+            # Create Triton config.pbtxt for vLLM backend
+            echo "Creating config.pbtxt..."
+            cat > "${MODEL_DIR}/config.pbtxt" << 'PBTXT'
+            name: "mistral"
+            backend: "vllm"
+            max_batch_size: 0
+
+            model_transaction_policy {
+              decoupled: True
+            }
+
+            input [
+              {
+                name: "text_input"
+                data_type: TYPE_STRING
+                dims: [ 1 ]
+              },
+              {
+                name: "stream"
+                data_type: TYPE_BOOL
+                dims: [ 1 ]
+                optional: true
+              },
+              {
+                name: "max_tokens"
+                data_type: TYPE_INT32
+                dims: [ 1 ]
+                optional: true
+              }
+            ]
+
+            output [
+              {
+                name: "text_output"
+                data_type: TYPE_STRING
+                dims: [ -1 ]
+              }
+            ]
+
+            instance_group [
+              {
+                count: 1
+                kind: KIND_MODEL
+              }
+            ]
+
+            parameters {
+              key: "model"
+              value: { string_value: "mistralai/Mistral-7B-Instruct-v0.2" }
+            }
+            parameters {
+              key: "tensor_parallel_size"
+              value: { string_value: "1" }
+            }
+            parameters {
+              key: "gpu_memory_utilization"
+              value: { string_value: "0.85" }
+            }
+            parameters {
+              key: "max_model_len"
+              value: { string_value: "4096" }
+            }
+            parameters {
+              key: "dtype"
+              value: { string_value: "auto" }
+            }
+            PBTXT
+
+            # Create model.json (required by some vLLM backend versions)
+            echo "Creating model.json..."
+            cat > "${MODEL_DIR}/1/model.json" << 'JSON'
+            {
+              "model": "mistralai/Mistral-7B-Instruct-v0.2",
+              "tensor_parallel_size": 1,
+              "gpu_memory_utilization": 0.85,
+              "max_model_len": 4096,
+              "dtype": "auto"
+            }
+            JSON
+
+            echo ""
+            echo "Model repository setup complete:"
+            find /model-repository -type f -exec ls -la {} \;
+            echo ""
+
+        volumeMounts:
+        - name: model-repository
+          mountPath: /model-repository
+
+      containers:
+      - name: triton-profiler
+        image: fra.ocir.io/frntrd2vyxvi/models:llm-triton-offline-v1
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "=============================================="
+            echo "  Triton Server GPU Profiling with Nsight Systems"
+            echo "=============================================="
+            echo "Start time: $(date)"
+            echo ""
+
+            # ============================================
+            # Step 1: Install Nsight Systems
+            # ============================================
+            echo "Step 1: Installing Nsight Systems..."
+
+            if [ -f /tmp/nsight-systems-cli.deb ]; then
+                dpkg -i /tmp/nsight-systems-cli.deb 2>&1 | tail -5
+                echo "nsys installed from mounted package"
+            else
+                echo "ERROR: nsys package not found at /tmp/nsight-systems-cli.deb"
+                exit 1
+            fi
+
+            # Use full path to avoid PATH issues
+            NSYS="/opt/nvidia/nsight-systems-cli/2025.6.1/bin/nsys"
+
+            if [ ! -f "$NSYS" ]; then
+                echo "ERROR: nsys binary not found at $NSYS"
+                exit 1
+            fi
+
+            echo "nsys version:"
+            $NSYS --version
+            echo ""
+
+            # ============================================
+            # Step 2: Verify model repository
+            # ============================================
+            echo "Step 2: Verifying model repository..."
+            echo "Model repository contents:"
+            find /model-repository -type f -exec ls -la {} \;
+            echo ""
+
+            # ============================================
+            # Step 3: Create results directory
+            # ============================================
+            mkdir -p /results
+            echo "Results directory: /results"
+            echo ""
+
+            # ============================================
+            # Step 4: Start Triton with nsys profiling
+            # ============================================
+            echo "Step 4: Starting Triton server with nsys GPU profiling..."
+            echo ""
+            echo "Profiling configuration:"
+            echo "  - Trace: cuda, nvtx, cudnn, cublas, osrt"
+            echo "  - Duration: 300 seconds max (Triton takes longer to load)"
+            echo "  - CUDA memory tracking: enabled"
+            echo "  - Kernel backtraces: enabled"
+            echo ""
+
+            # Start Triton wrapped with nsys profiling
+            $NSYS profile \
+                --output=/results/triton_gpu_timeline \
+                --trace=cuda,nvtx,cudnn,cublas,osrt \
+                --cuda-memory-usage=true \
+                --cudabacktrace=kernel \
+                --force-overwrite=true \
+                --duration=300 \
+                --sample=process-tree \
+                --backtrace=dwarf \
+                tritonserver \
+                    --model-repository=/model-repository \
+                    --http-port=8000 \
+                    --grpc-port=8001 \
+                    --metrics-port=8002 \
+                    --log-verbose=1 \
+                    --strict-model-config=false &
+
+            TRITON_PID=$!
+            echo "Triton process started with PID: $TRITON_PID"
+            echo ""
+
+            # ============================================
+            # Step 5: Wait for server to be ready
+            # ============================================
+            echo "Step 5: Waiting for Triton server to be ready..."
+            echo "(Note: Triton with vLLM backend may take 3-5 minutes to load model)"
+            SERVER_READY=false
+            for i in $(seq 1 150); do
+                if curl -s http://localhost:8000/v2/health/ready 2>/dev/null | grep -q "true"; then
+                    echo "Triton server is ready! (attempt $i)"
+                    SERVER_READY=true
+                    break
+                fi
+                if [ $((i % 10)) -eq 0 ]; then
+                    echo "  Still waiting... ($i/150)"
+                fi
+                sleep 5
+            done
+
+            if [ "$SERVER_READY" = false ]; then
+                echo "WARNING: Triton server may not be fully ready"
+                echo "Checking server status..."
+                curl -s http://localhost:8000/v2/health/live || echo "Server not responding"
+            fi
+            echo ""
+
+            # ============================================
+            # Step 6: Generate inference load
+            # ============================================
+            echo "Step 6: Generating inference load for GPU profiling..."
+            echo "Sending 10 inference requests..."
+            echo ""
+
+            for i in $(seq 1 10); do
+                echo "  Request $i/10..."
+                RESPONSE=$(curl -s -w "\n%{http_code}" http://localhost:8000/v2/models/mistral/generate \
+                    -H "Content-Type: application/json" \
+                    -d '{
+                        "text_input": "Explain transformer self-attention mechanism with mathematical details. Include the scaled dot-product attention formula and multi-head attention.",
+                        "max_tokens": 150
+                    }' 2>/dev/null)
+                HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+                if [ "$HTTP_CODE" = "200" ]; then
+                    echo "    Request $i completed successfully"
+                else
+                    echo "    Request $i returned HTTP $HTTP_CODE (may still be loading)"
+                fi
+                sleep 3
+            done
+
+            echo ""
+            echo "Inference requests completed."
+            echo ""
+
+            # ============================================
+            # Step 7: Wait for profiling to complete
+            # ============================================
+            echo "Step 7: Waiting for nsys profiling to complete..."
+            wait $TRITON_PID 2>/dev/null || true
+
+            echo ""
+            echo "=============================================="
+            echo "  Profiling Complete"
+            echo "=============================================="
+            echo ""
+
+            # ============================================
+            # Step 8: Display results
+            # ============================================
+            echo "Generated profile files:"
+            ls -lh /results/
+            echo ""
+
+            if [ -f /results/triton_gpu_timeline.nsys-rep ]; then
+                PROFILE_SIZE=$(ls -lh /results/triton_gpu_timeline.nsys-rep | awk '{print $5}')
+                echo "SUCCESS: Profile generated - $PROFILE_SIZE"
+                echo ""
+                echo "To extract the profile:"
+                echo "  kubectl cp bench/$(hostname):/results/triton_gpu_timeline.nsys-rep ./triton_gpu_timeline.nsys-rep"
+            else
+                echo "WARNING: Profile file not found."
+            fi
+
+            echo ""
+            echo "End time: $(date)"
+            echo ""
+            echo "Keeping pod alive for file extraction (30 minutes)..."
+            sleep 1800
+
+        env:
+        - name: HF_HOME
+          value: "/root/.cache/huggingface"
+        - name: TRANSFORMERS_OFFLINE
+          value: "0"
+
+        resources:
+          requests:
+            memory: "32Gi"
+            cpu: "8"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "48Gi"
+            cpu: "16"
+            nvidia.com/gpu: "1"
+
+        volumeMounts:
+        - name: nsys-package
+          mountPath: /tmp/nsight-systems-cli.deb
+          subPath: nsight-systems-cli-2025.6.1.deb
+        - name: model-repository
+          mountPath: /model-repository
+        - name: results
+          mountPath: /results
+        - name: dshm
+          mountPath: /dev/shm
+
+      volumes:
+      # nsys package from host
+      - name: nsys-package
+        hostPath:
+          path: /tmp/nsight-systems-cli-2025.6.1.deb
+          type: File
+      # Model repository (shared with init container)
+      - name: model-repository
+        emptyDir: {}
+      # Results directory
+      - name: results
+        emptyDir: {}
+      # Shared memory for PyTorch
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: "16Gi"
+
+      nodeSelector:
+        nvidia.com/gpu: "true"
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

@@ -1,0 +1,53 @@
+# Benchmark Matrix Configuration
+# Defines the test scenarios for LLM inference benchmarking
+
+# Inference backends to test
+backends:
+  - vllm
+  - triton
+  - tgi
+
+# Concurrency levels (number of simultaneous requests)
+concurrency:
+  - 1     # Sequential baseline
+  - 8     # Moderate load
+  - 32    # High load
+
+# Maximum tokens to generate per request
+max_tokens:
+  - 128   # Short responses
+  - 512   # Medium responses
+
+# Input context lengths to test (tokens)
+# Note: Requires different prompts for each length
+input_lengths:
+  - 2048  # Standard context
+  - 4096  # Extended context
+  # - 8192  # Long context (may OOM on A10)
+
+# Number of iterations per configuration
+iterations: 100
+
+# Warmup iterations (not measured)
+warmup: 10
+
+# Request timeout in seconds
+timeout: 60
+
+# GPU configuration for cost calculation
+gpu:
+  type: A10
+  hourly_rate_usd: 1.50
+  memory_gb: 24
+
+# Model configuration
+model:
+  name: mistralai/Mistral-7B-Instruct-v0.2
+  max_model_len: 8192
+  dtype: auto
+
+# Output configuration
+output:
+  format: json
+  include_raw_latencies: true
+  generate_plots: true

@@ -1,0 +1,1 @@
+{"backend": "tgi", "concurrency": 4, "max_tokens": 50, "total_requests": 30, "successful_requests": 30, "failed_requests": 0, "total_time_sec": 14.367, "throughput_rps": 2.088, "tokens_per_sec": 104.4, "avg_latency_ms": 1795.4, "p50_latency_ms": 1795.9, "p95_latency_ms": 1799.9, "p99_latency_ms": 1800.2, "min_latency_ms": 1782.8, "max_latency_ms": 1800.2}

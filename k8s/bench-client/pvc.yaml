@@ -1,0 +1,14 @@
+---
+# Persistent Volume Claim for storing benchmark results
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bench-results-pvc
+  namespace: bench
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: oci-bv

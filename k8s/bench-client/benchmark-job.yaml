@@ -1,0 +1,474 @@
+---
+# Comprehensive Benchmark Job for vLLM, Triton, TGI
+# Runs extensive benchmarking and nsys profiling
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: llm-benchmark-full
+  namespace: bench
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400  # Keep for 24 hours
+  template:
+    metadata:
+      labels:
+        app: bench-client
+    spec:
+      restartPolicy: Never
+      serviceAccountName: bench-sa
+      imagePullSecrets:
+        - name: ocirsecret
+
+      containers:
+      - name: benchmark
+        image: fra.ocir.io/frntrd2vyxvi/models:llm-bench-client-v1
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "=============================================="
+            echo "  LLM Inference Benchmark Suite"
+            echo "  vLLM vs Triton vs TGI"
+            echo "=============================================="
+            echo ""
+
+            # Configuration
+            RESULTS_DIR="/results"
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            RESULTS_PATH="${RESULTS_DIR}/benchmark_${TIMESTAMP}"
+            mkdir -p "${RESULTS_PATH}/profiles" "${RESULTS_PATH}/benchmarks" "${RESULTS_PATH}/logs"
+
+            # Backend endpoints (using internal service names)
+            VLLM_URL="http://vllm-service.bench.svc.cluster.local:8000"
+            TRITON_URL="http://triton-service.bench.svc.cluster.local:8000"
+            TGI_URL="http://tgi-service.bench.svc.cluster.local:8000"
+
+            # Test prompts of varying lengths
+            SHORT_PROMPT="What is AI?"
+            MEDIUM_PROMPT="Explain the key differences between supervised and unsupervised machine learning, providing examples of each."
+            LONG_PROMPT="Write a comprehensive guide on building a production-ready machine learning pipeline, including data preprocessing, feature engineering, model training, hyperparameter tuning, model evaluation, deployment strategies, and monitoring best practices. Include specific tools and frameworks that are commonly used in the industry."
+
+            # Benchmark parameters
+            WARMUP_REQUESTS=10
+            BENCHMARK_REQUESTS=100
+            CONCURRENCY_LEVELS="1 4 8 16 32"
+            MAX_TOKENS_LIST="50 100 256"
+
+            echo "Results will be saved to: ${RESULTS_PATH}"
+            echo ""
+
+            # Function to wait for service
+            wait_for_service() {
+                local url=$1
+                local name=$2
+                echo "Waiting for ${name}..."
+                for i in $(seq 1 30); do
+                    if curl -s "${url}/health" > /dev/null 2>&1 || \
+                       curl -s "${url}/v2/health/ready" > /dev/null 2>&1; then
+                        echo "  ${name} is ready!"
+                        return 0
+                    fi
+                    sleep 2
+                done
+                echo "  WARNING: ${name} not ready after 60s"
+                return 1
+            }
+
+            # Function to benchmark vLLM
+            benchmark_vllm() {
+                local prompt="$1"
+                local max_tokens=$2
+                local concurrency=$3
+                local num_requests=$4
+                local output_file=$5
+
+                echo "  Benchmarking vLLM: concurrency=${concurrency}, max_tokens=${max_tokens}"
+
+                python3 << EOFPY
+            import requests
+            import time
+            import json
+            import concurrent.futures
+            import statistics
+
+            url = "${VLLM_URL}/v1/completions"
+            prompt = """${prompt}"""
+            max_tokens = ${max_tokens}
+            concurrency = ${concurrency}
+            num_requests = ${num_requests}
+
+            results = []
+            errors = 0
+
+            def make_request(i):
+                try:
+                    start = time.time()
+                    resp = requests.post(url, json={
+                        "model": "mistralai/Mistral-7B-Instruct-v0.2",
+                        "prompt": prompt,
+                        "max_tokens": max_tokens
+                    }, timeout=120)
+                    latency = time.time() - start
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        tokens = data.get("usage", {}).get("completion_tokens", max_tokens)
+                        return {"latency": latency, "tokens": tokens, "success": True}
+                    return {"latency": latency, "tokens": 0, "success": False}
+                except Exception as e:
+                    return {"latency": 0, "tokens": 0, "success": False, "error": str(e)}
+
+            start_time = time.time()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+                results = list(executor.map(make_request, range(num_requests)))
+            total_time = time.time() - start_time
+
+            successful = [r for r in results if r["success"]]
+            latencies = [r["latency"] for r in successful]
+            total_tokens = sum(r["tokens"] for r in successful)
+
+            stats = {
+                "backend": "vllm",
+                "concurrency": concurrency,
+                "max_tokens": max_tokens,
+                "total_requests": num_requests,
+                "successful_requests": len(successful),
+                "failed_requests": num_requests - len(successful),
+                "total_time_sec": total_time,
+                "throughput_rps": len(successful) / total_time if total_time > 0 else 0,
+                "tokens_per_sec": total_tokens / total_time if total_time > 0 else 0,
+                "avg_latency_ms": statistics.mean(latencies) * 1000 if latencies else 0,
+                "p50_latency_ms": statistics.median(latencies) * 1000 if latencies else 0,
+                "p95_latency_ms": sorted(latencies)[int(len(latencies)*0.95)] * 1000 if len(latencies) > 1 else 0,
+                "p99_latency_ms": sorted(latencies)[int(len(latencies)*0.99)] * 1000 if len(latencies) > 1 else 0,
+                "min_latency_ms": min(latencies) * 1000 if latencies else 0,
+                "max_latency_ms": max(latencies) * 1000 if latencies else 0
+            }
+
+            with open("${output_file}", "w") as f:
+                json.dump(stats, f, indent=2)
+
+            print(f"    Throughput: {stats['throughput_rps']:.2f} req/s, {stats['tokens_per_sec']:.2f} tok/s")
+            print(f"    Latency: avg={stats['avg_latency_ms']:.1f}ms, p95={stats['p95_latency_ms']:.1f}ms")
+            EOFPY
+            }
+
+            # Function to benchmark Triton
+            benchmark_triton() {
+                local prompt="$1"
+                local max_tokens=$2
+                local concurrency=$3
+                local num_requests=$4
+                local output_file=$5
+
+                echo "  Benchmarking Triton: concurrency=${concurrency}, max_tokens=${max_tokens}"
+
+                python3 << EOFPY
+            import requests
+            import time
+            import json
+            import concurrent.futures
+            import statistics
+
+            url = "${TRITON_URL}/v2/models/mistral/generate"
+            prompt = """${prompt}"""
+            max_tokens = ${max_tokens}
+            concurrency = ${concurrency}
+            num_requests = ${num_requests}
+
+            def make_request(i):
+                try:
+                    start = time.time()
+                    resp = requests.post(url, json={
+                        "text_input": prompt,
+                        "parameters": {"max_tokens": max_tokens}
+                    }, timeout=120)
+                    latency = time.time() - start
+                    if resp.status_code == 200:
+                        return {"latency": latency, "tokens": max_tokens, "success": True}
+                    return {"latency": latency, "tokens": 0, "success": False}
+                except Exception as e:
+                    return {"latency": 0, "tokens": 0, "success": False}
+
+            start_time = time.time()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+                results = list(executor.map(make_request, range(num_requests)))
+            total_time = time.time() - start_time
+
+            successful = [r for r in results if r["success"]]
+            latencies = [r["latency"] for r in successful]
+            total_tokens = sum(r["tokens"] for r in successful)
+
+            stats = {
+                "backend": "triton",
+                "concurrency": concurrency,
+                "max_tokens": max_tokens,
+                "total_requests": num_requests,
+                "successful_requests": len(successful),
+                "failed_requests": num_requests - len(successful),
+                "total_time_sec": total_time,
+                "throughput_rps": len(successful) / total_time if total_time > 0 else 0,
+                "tokens_per_sec": total_tokens / total_time if total_time > 0 else 0,
+                "avg_latency_ms": statistics.mean(latencies) * 1000 if latencies else 0,
+                "p50_latency_ms": statistics.median(latencies) * 1000 if latencies else 0,
+                "p95_latency_ms": sorted(latencies)[int(len(latencies)*0.95)] * 1000 if len(latencies) > 1 else 0,
+                "p99_latency_ms": sorted(latencies)[int(len(latencies)*0.99)] * 1000 if len(latencies) > 1 else 0,
+                "min_latency_ms": min(latencies) * 1000 if latencies else 0,
+                "max_latency_ms": max(latencies) * 1000 if latencies else 0
+            }
+
+            with open("${output_file}", "w") as f:
+                json.dump(stats, f, indent=2)
+
+            print(f"    Throughput: {stats['throughput_rps']:.2f} req/s, {stats['tokens_per_sec']:.2f} tok/s")
+            print(f"    Latency: avg={stats['avg_latency_ms']:.1f}ms, p95={stats['p95_latency_ms']:.1f}ms")
+            EOFPY
+            }
+
+            # Function to benchmark TGI
+            benchmark_tgi() {
+                local prompt="$1"
+                local max_tokens=$2
+                local concurrency=$3
+                local num_requests=$4
+                local output_file=$5
+
+                echo "  Benchmarking TGI: concurrency=${concurrency}, max_tokens=${max_tokens}"
+
+                python3 << EOFPY
+            import requests
+            import time
+            import json
+            import concurrent.futures
+            import statistics
+
+            url = "${TGI_URL}/generate"
+            prompt = """${prompt}"""
+            max_tokens = ${max_tokens}
+            concurrency = ${concurrency}
+            num_requests = ${num_requests}
+
+            def make_request(i):
+                try:
+                    start = time.time()
+                    resp = requests.post(url, json={
+                        "inputs": prompt,
+                        "parameters": {"max_new_tokens": max_tokens}
+                    }, timeout=120)
+                    latency = time.time() - start
+                    if resp.status_code == 200:
+                        return {"latency": latency, "tokens": max_tokens, "success": True}
+                    return {"latency": latency, "tokens": 0, "success": False}
+                except Exception as e:
+                    return {"latency": 0, "tokens": 0, "success": False}
+
+            start_time = time.time()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+                results = list(executor.map(make_request, range(num_requests)))
+            total_time = time.time() - start_time
+
+            successful = [r for r in results if r["success"]]
+            latencies = [r["latency"] for r in successful]
+            total_tokens = sum(r["tokens"] for r in successful)
+
+            stats = {
+                "backend": "tgi",
+                "concurrency": concurrency,
+                "max_tokens": max_tokens,
+                "total_requests": num_requests,
+                "successful_requests": len(successful),
+                "failed_requests": num_requests - len(successful),
+                "total_time_sec": total_time,
+                "throughput_rps": len(successful) / total_time if total_time > 0 else 0,
+                "tokens_per_sec": total_tokens / total_time if total_time > 0 else 0,
+                "avg_latency_ms": statistics.mean(latencies) * 1000 if latencies else 0,
+                "p50_latency_ms": statistics.median(latencies) * 1000 if latencies else 0,
+                "p95_latency_ms": sorted(latencies)[int(len(latencies)*0.95)] * 1000 if len(latencies) > 1 else 0,
+                "p99_latency_ms": sorted(latencies)[int(len(latencies)*0.99)] * 1000 if len(latencies) > 1 else 0,
+                "min_latency_ms": min(latencies) * 1000 if latencies else 0,
+                "max_latency_ms": max(latencies) * 1000 if latencies else 0
+            }
+
+            with open("${output_file}", "w") as f:
+                json.dump(stats, f, indent=2)
+
+            print(f"    Throughput: {stats['throughput_rps']:.2f} req/s, {stats['tokens_per_sec']:.2f} tok/s")
+            print(f"    Latency: avg={stats['avg_latency_ms']:.1f}ms, p95={stats['p95_latency_ms']:.1f}ms")
+            EOFPY
+            }
+
+            # Wait for all services
+            echo "=============================================="
+            echo "  Checking Service Availability"
+            echo "=============================================="
+            wait_for_service "${VLLM_URL}" "vLLM"
+            wait_for_service "${TRITON_URL}" "Triton"
+            wait_for_service "${TGI_URL}" "TGI"
+            echo ""
+
+            # Warmup
+            echo "=============================================="
+            echo "  Warmup Phase (${WARMUP_REQUESTS} requests each)"
+            echo "=============================================="
+            echo "Warming up vLLM..."
+            for i in $(seq 1 ${WARMUP_REQUESTS}); do
+                curl -s "${VLLM_URL}/v1/completions" -H "Content-Type: application/json" \
+                    -d '{"model":"mistralai/Mistral-7B-Instruct-v0.2","prompt":"Hello","max_tokens":10}' > /dev/null &
+            done
+            wait
+
+            echo "Warming up Triton..."
+            for i in $(seq 1 ${WARMUP_REQUESTS}); do
+                curl -s "${TRITON_URL}/v2/models/mistral/generate" -H "Content-Type: application/json" \
+                    -d '{"text_input":"Hello","parameters":{"max_tokens":10}}' > /dev/null &
+            done
+            wait
+
+            echo "Warming up TGI..."
+            for i in $(seq 1 ${WARMUP_REQUESTS}); do
+                curl -s "${TGI_URL}/generate" -H "Content-Type: application/json" \
+                    -d '{"inputs":"Hello","parameters":{"max_new_tokens":10}}' > /dev/null &
+            done
+            wait
+            echo "Warmup complete!"
+            echo ""
+
+            # Run comprehensive benchmarks
+            echo "=============================================="
+            echo "  Running Comprehensive Benchmarks"
+            echo "=============================================="
+
+            for max_tokens in ${MAX_TOKENS_LIST}; do
+                echo ""
+                echo ">>> Max Tokens: ${max_tokens}"
+                echo "-------------------------------------------"
+
+                for concurrency in ${CONCURRENCY_LEVELS}; do
+                    echo ""
+                    echo ">> Concurrency: ${concurrency}"
+
+                    # vLLM
+                    benchmark_vllm "${MEDIUM_PROMPT}" ${max_tokens} ${concurrency} ${BENCHMARK_REQUESTS} \
+                        "${RESULTS_PATH}/benchmarks/vllm_c${concurrency}_t${max_tokens}.json"
+
+                    # Triton
+                    benchmark_triton "${MEDIUM_PROMPT}" ${max_tokens} ${concurrency} ${BENCHMARK_REQUESTS} \
+                        "${RESULTS_PATH}/benchmarks/triton_c${concurrency}_t${max_tokens}.json"
+
+                    # TGI
+                    benchmark_tgi "${MEDIUM_PROMPT}" ${max_tokens} ${concurrency} ${BENCHMARK_REQUESTS} \
+                        "${RESULTS_PATH}/benchmarks/tgi_c${concurrency}_t${max_tokens}.json"
+                done
+            done
+
+            echo ""
+            echo "=============================================="
+            echo "  Generating Summary Report"
+            echo "=============================================="
+
+            python3 << EOFPY
+            import json
+            import os
+            from pathlib import Path
+
+            results_dir = "${RESULTS_PATH}/benchmarks"
+            summary = {"vllm": [], "triton": [], "tgi": []}
+
+            for f in Path(results_dir).glob("*.json"):
+                with open(f) as fp:
+                    data = json.load(fp)
+                    summary[data["backend"]].append(data)
+
+            # Generate markdown report
+            report = """# LLM Inference Benchmark Results
+
+            ## Test Configuration
+            - Model: Mistral-7B-Instruct-v0.2
+            - Backends: vLLM, Triton (vLLM backend), TGI
+            - Requests per test: ${BENCHMARK_REQUESTS}
+            - Concurrency levels: ${CONCURRENCY_LEVELS}
+            - Max tokens: ${MAX_TOKENS_LIST}
+
+            ## Summary Table
+
+            | Backend | Concurrency | Max Tokens | Throughput (req/s) | Tokens/s | Avg Latency (ms) | P95 Latency (ms) |
+            |---------|-------------|------------|-------------------|----------|------------------|------------------|
+            """
+
+            for backend in ["vllm", "triton", "tgi"]:
+                for result in sorted(summary[backend], key=lambda x: (x["max_tokens"], x["concurrency"])):
+                    report += f"| {backend} | {result['concurrency']} | {result['max_tokens']} | {result['throughput_rps']:.2f} | {result['tokens_per_sec']:.1f} | {result['avg_latency_ms']:.1f} | {result['p95_latency_ms']:.1f} |\n"
+
+            report += """
+            ## Key Findings
+
+            ### Throughput Comparison (requests/second)
+            """
+
+            # Find best throughput for each backend at highest concurrency
+            for backend in ["vllm", "triton", "tgi"]:
+                if summary[backend]:
+                    best = max(summary[backend], key=lambda x: x["throughput_rps"])
+                    report += f"- **{backend.upper()}**: {best['throughput_rps']:.2f} req/s (concurrency={best['concurrency']}, tokens={best['max_tokens']})\n"
+
+            report += """
+            ### Latency Comparison (P95, lower is better)
+            """
+
+            for backend in ["vllm", "triton", "tgi"]:
+                if summary[backend]:
+                    # Get P95 at concurrency=1
+                    c1_results = [r for r in summary[backend] if r["concurrency"] == 1]
+                    if c1_results:
+                        best = min(c1_results, key=lambda x: x["p95_latency_ms"])
+                        report += f"- **{backend.upper()}**: {best['p95_latency_ms']:.1f}ms (tokens={best['max_tokens']})\n"
+
+            with open("${RESULTS_PATH}/BENCHMARK_REPORT.md", "w") as f:
+                f.write(report)
+
+            # Save combined JSON
+            with open("${RESULTS_PATH}/all_results.json", "w") as f:
+                json.dump(summary, f, indent=2)
+
+            print("Report generated: ${RESULTS_PATH}/BENCHMARK_REPORT.md")
+            EOFPY
+
+            echo ""
+            echo "=============================================="
+            echo "  Benchmark Complete!"
+            echo "=============================================="
+            echo ""
+            echo "Results saved to: ${RESULTS_PATH}"
+            echo ""
+            ls -la "${RESULTS_PATH}/"
+            echo ""
+            ls -la "${RESULTS_PATH}/benchmarks/"
+            echo ""
+            echo "To copy results from pod:"
+            echo "  kubectl cp bench/\$(kubectl get pod -l app=bench-client -n bench -o jsonpath='{.items[0].metadata.name}'):${RESULTS_PATH} ./benchmark_results/"
+            echo ""
+
+            # Keep pod running for result extraction
+            echo "Pod will stay running for 1 hour for result extraction..."
+            sleep 3600
+
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+
+        volumeMounts:
+        - name: results
+          mountPath: /results
+
+      volumes:
+      - name: results
+        persistentVolumeClaim:
+          claimName: bench-results-pvc
+
+      tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
