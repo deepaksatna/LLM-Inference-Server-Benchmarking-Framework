@@ -3,22 +3,20 @@
 A comprehensive benchmarking framework for comparing LLM inference servers on Kubernetes with NVIDIA GPUs.
 
 <!-- Technology Badges -->
-![Kubernetes](https://img.shields.io/badge/Platform-Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)
-![NVIDIA GPU](https://img.shields.io/badge/GPU-NVIDIA-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-Container-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+[![Kubernetes](https://img.shields.io/badge/Platform-Kubernetes-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+[![NVIDIA GPU](https://img.shields.io/badge/GPU-NVIDIA_A10-76B900?logo=nvidia&logoColor=white)](https://www.nvidia.com/en-us/data-center/products/a10-gpu/)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Docker](https://img.shields.io/badge/Docker-Container-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 
 <!-- Inference Server Badges -->
-![vLLM](https://img.shields.io/badge/vLLM-PagedAttention-FF6F00?style=for-the-badge)
-![NVIDIA Triton](https://img.shields.io/badge/NVIDIA_Triton-Inference_Server-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
-![HuggingFace TGI](https://img.shields.io/badge/HuggingFace-TGI-FFD21E?style=for-the-badge&logo=huggingface&logoColor=black)
+[![vLLM](https://img.shields.io/badge/vLLM-PagedAttention-FF6F00)](https://github.com/vllm-project/vllm)
+[![NVIDIA Triton](https://img.shields.io/badge/NVIDIA_Triton-Inference_Server-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/triton-inference-server)
+[![HuggingFace TGI](https://img.shields.io/badge/HuggingFace-TGI-FFD21E?logo=huggingface&logoColor=black)](https://github.com/huggingface/text-generation-inference)
 
 <!-- Profiling Badge -->
-![Nsight Systems](https://img.shields.io/badge/Profiling-Nsight_Systems-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
+[![Nsight Systems](https://img.shields.io/badge/Profiling-Nsight_Systems-76B900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/nsight-systems)
 
 ---
-
-![Benchmark Dashboard](results/plots/benchmark_summary_dashboard.png)
 
 ## Overview
 
@@ -101,6 +99,8 @@ Deploying Large Language Models in production presents unique challenges that th
 | **Best For** | Maximum throughput | Production monitoring | Lowest latency |
 | **API** | OpenAI-compatible | gRPC + HTTP | REST + Streaming |
 | **Memory** | Most efficient | Good (vLLM backend) | Good |
+
+![Benchmark Dashboard](results/plots/benchmark_summary_dashboard.png)
 
 ### Platform Requirements
 
